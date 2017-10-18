@@ -1,14 +1,13 @@
 import io
-import re
-import multiprocessing
-import time
+import json
 from ftplib import FTP
-
 import boto3
+
+SESSION = 'ecs'
 
 # region S3 info
 BUCKET = "abb-integracao"
-PATH_BUCKET = 'QA2/'
+PATH_BUCKET = 'QA/'
 # endregion
 
 # region FTP Info
@@ -22,20 +21,22 @@ PATH_FTP = 'QA/'
 files_keys = {}
 
 
-# region Decorator measure timing
-def timeit(method):
-    def timed(*args, **kwargs):
-        ts = time.time()
-        result = method(*args, **kwargs)
-        te = time.time()
-
-        print('%r took %2.2f sec' % (method.__name__, te - ts))
-        return result
-
-    return timed
+# region Bucket Functions
+def get_s3(session=None):
+    if session is not None:
+        session = boto3.Session(profile_name=session)
+        return session.resource('s3')
+    else:
+        return boto3.resource('s3')
 
 
-# endregion
+def get_lambda(session=None):
+    if session is not None:
+        session = boto3.Session(profile_name=session)
+        return session.client('lambda')
+    else:
+        return boto3.client('lambda')
+
 
 def upload(fname, file):
     """
@@ -45,97 +46,43 @@ def upload(fname, file):
     """
     try:
         if len(fname) > 0:
-            print("Publishing %s" % (PATH_BUCKET + fname + '.csv'))
+            print("Publishing %s" % (PATH_BUCKET + fname + '/' + fname + '.csv'))
 
-            session = boto3.Session(profile_name='ecs')
-            s3 = session.resource('s3')
-            s3.Object(BUCKET, PATH_BUCKET + fname + '.csv').put(Body=file)
+            get_s3(SESSION).Object(BUCKET, PATH_BUCKET + fname + '/' + fname + '.csv').put(Body=file)
     except Exception as err:
         # Print error and raise it to stop loop for upload
         print(err)
         raise Exception(err)
 
 
-def empty_bucket():
-    """
-    Empty selected Bucket
-    """
-    try:
-        session = boto3.Session(profile_name='ecs')
-        s3 = session.resource('s3')
-        s3.Bucket(BUCKET).objects.all().delete()
-    except Exception as err:
-        # Print error and raise it to stop process
-        print(err)
-        raise Exception(err)
+# endregion
 
 
-def get_prefix(filename):
-    """
-    Get the prefix from the given filename
-    :param filename: string
-    :return: match group
-    """
-    return re.search(r'(?P<prefix>[^0-9]+)_[0-9]+\.[^0-9]+', filename)
-
-
-def prepare_file(filename, file_download):
-    # Download binary data and send do S3
-    print("Downloading %s..." % filename)
-
-    bytes_io = io.BytesIO()
-
-    with FTP(host=HOST, user=USER, passwd=PASSWD) as ftp:
-        # with file as file:
-        ftp.retrbinary("RETR " + PATH_FTP + file_download, bytes_io.write)
-
-        bytes_io.seek(0)
-
-        # assume bytes_io is a `BytesIO` object
-        byte_str = bytes_io.read()
-
-        # Convert to a "unicode" object
-        text_obj = byte_str.decode('UTF-8')
-
-        upload(filename, text_obj)
-
-
-@timeit
-def def_handler():
-    # print("Starting: %s" % multiprocessing.current_process().name)
-
+def lambda_handler(event, context):
     """
     Get files from FTP and upload to S3
     """
     try:
-        # Empty target Bucket
-        empty_bucket()
+        event = json.dumps(event)
 
-        # Open connection to FTP and close it when is done
+        # Download binary data and send do S3
+        print("Downloading %s..." % event.filename)
+
+        bytes_io = io.BytesIO()
+
         with FTP(host=HOST, user=USER, passwd=PASSWD) as ftp:
-            # Print 'welcome message'
-            print(ftp.getwelcome())
+            # with file as file:
+            ftp.retrbinary("RETR " + PATH_FTP + event.download, bytes_io.write)
 
-            # Change directory inside FTP
-            ftp.cwd(PATH_FTP)
+            bytes_io.seek(0)
 
-            # Get files who has prefix
-            for filename in ftp.nlst():
-                prefix = get_prefix(filename)
+            # assume bytes_io is a `BytesIO` object
+            byte_str = bytes_io.read()
 
-                if prefix is not None:
-                    prefix = prefix.group('prefix')
-                    files_keys[prefix] = filename
+            # Convert to a "unicode" object
+            text_obj = byte_str.decode('UTF-8')
 
-        for i in files_keys:
-            process = multiprocessing.Process(target=prepare_file, args=(i, files_keys[i]))
-            # process.daemon = True
-            process.start()
-            # process.join()
+            upload(event.fname, text_obj)
 
     except Exception as err:
         print(err)
-
-
-if __name__ == "__main__":
-    def_handler()
